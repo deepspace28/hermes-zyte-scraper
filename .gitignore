@@ -1,0 +1,29 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Private research artifacts - DO NOT PUBLISH
+internal/research/
+internal/docs/FULL_DEVELOPMENT_HISTORY.*
+internal/docs/zyte-study.md
+
+# Internal dashboards and logs
+autoresearch_dashboard.md
+
+# Environment and secrets
+.env
+*.env
+sshkey
+*.pem
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Generated files that shouldn't be committed
+*.log

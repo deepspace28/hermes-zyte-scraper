@@ -1,0 +1,34 @@
+name: hermes-zyte-scraper
+version: "0.5.0"
+description: |
+  Elite-grade Zyte integration for Hermes.
+  
+  Designed to be best-in-class for:
+  - Intelligent spider generation from natural language (zyte_build_spider)
+  - High-quality, resilient multi-page extraction on the hardest sites (zyte_extract)
+  - Production-ready Scrapy + Zyte projects (cloud + local)
+  - Andrej Karpathy-style autonomous research (autoresearch)
+  - Full operational layer: Deploy & manage continuous spiders on Scrapy Cloud (zyte_deploy, zyte_schedule, zyte_list_jobs, zyte_get_results)
+  
+  Goal: Let agents describe what to scrape → generate elite spiders → deploy them to run continuously on Scrapy Cloud.
+author: "Hermes + User"
+provides_tools:
+  - zyte_extract
+  - zyte_build_spider
+  - autoresearch
+  # Operational Layer (Phase 4)
+  - zyte_deploy
+  - zyte_list_jobs
+  - zyte_get_results
+  - zyte_schedule
+requires_env:
+  - name: ZYTE_API_KEY
+    description: "Zyte API key (get at https://app.zyte.com/o/zyte-api/api-access)"
+    url: "https://app.zyte.com/o/zyte-api/api-access"
+    secret: true
+  - name: SCRAPY_CLOUD_API_KEY
+    description: "Scrapy Cloud API key (separate from Zyte API key; used for deploy/schedule/list/results)"
+    url: "https://app.zyte.com/o/settings/apikey"
+    secret: true
+kind: standalone
+tags: [zyte, scraping, spider-generation, data-extraction, production]

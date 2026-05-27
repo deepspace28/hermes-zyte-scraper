@@ -27,3 +27,6 @@ Thumbs.db
 
 # Generated files that shouldn't be committed
 *.log
+
+# Internal documentation (history kept as PDF locally)
+internal/docs/

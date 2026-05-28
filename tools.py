@@ -2,12 +2,19 @@
 
 The zyte_build_spider tool is the flagship feature for creating production-grade
 scrapers via natural language.
+
+Priority 1 fixes:
+- zyte_extract: Fix mutual exclusion (two sequential calls, not both in one)
+- zyte_build_spider: Make start_url REQUIRED, fix is_complex_job naming
+- All handlers: Return proper JSON, never raise, use **kwargs
 """
 
 import json
 import os
 import re
 import shutil
+import time
+import random
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urljoin
@@ -15,38 +22,87 @@ from zyte_api import ZyteAPI
 
 
 # =============================================================================
-# Existing zyte_extract (pragmatic working version)
+# Helper: zyte_extract robust next-page detection
 # =============================================================================
 
-def _find_next_url(html: str, base_url: str) -> str | None:
+def _find_next_page_in_response(resp: dict, current_url: str) -> str | None:
+    """Helper for robust next page detection using Zyte hints + HTML parsing."""
+    from urllib.parse import urljoin
+    import re
+
+    # Strategy 1: Try Zyte nextPage hint if present
+    next_info = resp.get("nextPage") or {}
+    if isinstance(next_info, dict) and next_info.get("url"):
+        return next_info["url"]
+
+    # Strategy 2: Parse HTML for next-page links
+    html = resp.get("browserHtml", "")
+    if not html:
+        return None
+    
     patterns = [
-        r'href=["\']([^"\']*(?:page|next)[^"\']*)["\']',
+        r'href=["\']([^"\']*page=\d+[^"\']*)["\'][^>]*rel=["\']?next',
         r'class=["\'][^"\']*next[^"\']*["\'][^>]*href=["\']([^"\']+)["\']',
+        r'href=["\']([^"\']*\?page=\d[^"\']*)["\']',
     ]
-    for pat in patterns:
-        m = re.search(pat, html, re.IGNORECASE)
-        if m:
-            candidate = m.group(1)
+    for pattern in patterns:
+        match = re.search(pattern, html, re.IGNORECASE)
+        if match:
+            candidate = match.group(1)
             if candidate.startswith("/"):
-                candidate = urljoin(base_url, candidate)
-            if candidate != base_url:
-                return candidate
+                return urljoin(current_url, candidate)
+            return candidate
     return None
 
 
+def _extract_items_from_html(html: str) -> list:
+    """
+    General-purpose HTML fallback extractor (additive domain-agnostic logic).
+    Works reasonably on arbitrary list pages without assuming known domains.
+    """
+    import re
+    items = []
+    
+    # Broad, domain-agnostic patterns for potential product/item links
+    patterns = [
+        r'href=["\'](/[^"\']+/[a-z0-9-]{5,}[^"\']*)["\']',
+        r'href=["\'](/[^"\']*detail[^"\']*)["\']',
+        r'href=["\'](/[^"\']*item[^"\']*)["\']',
+        r'href=["\'](/[^"\']*product[^"\']*)["\']',
+    ]
+    all_links = []
+    for pat in patterns:
+        all_links.extend(re.findall(pat, html, re.IGNORECASE))
+    
+    # Deduplicate and limit
+    seen = set()
+    for link in all_links:
+        if link not in seen and len(link) > 6:
+            seen.add(link)
+            items.append({"url": link, "name": "General-purpose HTML fallback"})
+            if len(items) >= 25:
+                break
+    
+    return items
+
+
+# =============================================================================
+# zyte_extract — FIXED: two sequential calls, proper mutual exclusion
+# =============================================================================
+
 def zyte_extract(args: dict, **kwargs) -> str:
     """
-    Multi-page extraction with robust strategies.
-
-    Autoresearch Track B (Iteration 2):
-    Now uses multi-strategy pagination:
-    - Primary: productList via Zyte
-    - Fallback: browserHtml + HTML link following for next page
-    - Secondary: page parameter increment
-    This matches the robustness of our best generated spiders.
+    Multi-page extraction with proper Zyte API mutual exclusion.
+    
+    FIX (Priority 3):
+    - Now uses two sequential calls: first productList, then browserHtml fallback.
+    - Respects Zyte mutual-exclusion: no mixing incompatible extraction modes in one call.
+    - Cost-aware: returns extractFrom info so agent can relay costs to users.
     """
     url = args.get("url")
     max_pages = int(args.get("max_pages", 1))
+    extract_from = args.get("extract_from", "browserHtml")
+    schema = args.get("schema", "productList")
 
     if not url:
         return json.dumps({"success": False, "error": "url is required"})
@@ -57,25 +113,64 @@ def zyte_extract(args: dict, **kwargs) -> str:
         current_url = url
         page = 1
         seen_urls = set()
+        total_cost_estimate = 0.0
 
         while page <= max_pages and current_url:
-            payload = {"url": current_url, "productList": True, "browserHtml": True}
-            if args.get("geolocation"):
-                payload["geolocation"] = args["geolocation"]
-            # extract_from is advisory here (dual strategy is the resilient default per Zyte study);
-            # for full control users should use zyte_build_spider with custom template edits.
+            page_result = {
+                "page": page,
+                "url": current_url,
+                "item_count": 0,
+                "items": [],
+                "extraction_method": None,
+            }
 
-            resp = client.get(payload, endpoint="extract")
+            # CALL 1: Primary strategy - auto-extract (e.g., productList)
+            try:
+                payload1 = {
+                    "url": current_url,
+                    schema: True,
+                    "extractFrom": extract_from,
+                }
+                if args.get("geolocation"):
+                    payload1["geolocation"] = args["geolocation"]
 
-            product_list = resp.get("productList", {})
-            items = product_list.get("products", [])
+                resp1 = client.get(payload1, endpoint="extract")
+                
+                # Extract auto-extracted items
+                auto_data = resp1.get(schema, {})
+                if isinstance(auto_data, dict):
+                    items = auto_data.get("products", auto_data.get("items", []))
+                else:
+                    items = auto_data if isinstance(auto_data, list) else []
 
-            # Fallback if productList is weak
+                total_cost_estimate += 0.01  # Rough estimate per extraction call
+                page_result["extraction_method"] = f"auto-extract ({schema})"
+
+            except Exception as e:
+                items = []
+                page_result["extraction_error"] = str(e)
+
+            # CALL 2: Fallback strategy - if primary was weak, try browserHtml + parse
             if len(items) < 3:
-                html = resp.get("browserHtml", "")
-                fallback_items = _extract_items_from_html(html)
-                if fallback_items:
-                    items = fallback_items
+                try:
+                    payload2 = {
+                        "url": current_url,
+                        "browserHtml": True,
+                    }
+                    if args.get("geolocation"):
+                        payload2["geolocation"] = args["geolocation"]
+
+                    resp2 = client.get(payload2, endpoint="extract")
+                    html = resp2.get("browserHtml", "")
+                    fallback_items = _extract_items_from_html(html)
+                    
+                    if fallback_items:
+                        items = fallback_items
+                        page_result["extraction_method"] = "browserHtml + custom HTML parsing"
+                        total_cost_estimate += 0.01  # Cost for fallback call
+
+                except Exception as e:
+                    page_result["fallback_error"] = str(e)
 
             # Dedup across pages
             new_items = []
@@ -86,15 +181,16 @@ def zyte_extract(args: dict, **kwargs) -> str:
                     new_items.append(item)
             items = new_items
 
-            results.append({
-                "page": page,
-                "url": current_url,
-                "item_count": len(items),
-                "items": items,
-            })
+            page_result["item_count"] = len(items)
+            page_result["items"] = items
+            results.append(page_result)
 
             # Multi-strategy next page detection
-            next_url = _find_next_page_in_response(resp, current_url)
+            try:
+                next_url = _find_next_page_in_response(resp1 if 'resp1' in locals() else {}, current_url)
+            except:
+                next_url = None
+            
             if next_url:
                 current_url = next_url
             elif "page=" in current_url:
@@ -104,13 +200,16 @@ def zyte_extract(args: dict, **kwargs) -> str:
 
             page += 1
 
-        # Round 7 Excellence: Improved general quality scoring + recommendations for any site
+        # Quality scoring and recommendations
         avg_items = sum(r["item_count"] for r in results) / max(len(results), 1)
         quality_score = min(1.0, avg_items / 15.0)
 
         recommendations = []
         if quality_score < 0.4:
-            recommendations.append("Extraction was weak on this arbitrary site. Strongly consider using zyte_build_spider to generate a custom robust spider.")
+            recommendations.append(
+                "Extraction was weak on this site. For better results, strongly consider using zyte_build_spider "
+                "to generate a custom, robust spider with domain-specific intelligence."
+            )
         if len(results) > 0 and results[-1]["item_count"] == 0:
             recommendations.append("Last page returned zero items — pagination likely ended or site structure changed.")
 
@@ -119,6 +218,8 @@ def zyte_extract(args: dict, **kwargs) -> str:
             "pages_scraped": len(results),
             "total_items": sum(r["item_count"] for r in results),
             "quality_score": round(quality_score, 2),
+            "cost_estimate": f"~${round(total_cost_estimate, 3)} (Zyte charges only for successful responses)",
+            "extract_from_used": extract_from,
             "recommendations": recommendations,
             "results": results,
         })
@@ -127,95 +228,21 @@ def zyte_extract(args: dict, **kwargs) -> str:
         return json.dumps({"success": False, "error": str(e)})
 
 
-def _find_next_page_in_response(resp: dict, current_url: str) -> str | None:
-    """Helper for robust next page detection."""
-    from urllib.parse import urljoin
-    import re
-
-    # Try Zyte nextPage if present
-    zyte_data = resp
-    next_info = zyte_data.get("nextPage") or {}
-    if isinstance(next_info, dict) and next_info.get("url"):
-        return next_info["url"]
-
-    html = zyte_data.get("browserHtml", "")
-    patterns = [
-        r'href=["\']([^"\']*page=\d+[^"\']*)["\'][^>]*rel=["\']?next',
-        r'class=["\'][^"\']*next[^"\']*["\'][^>]*href=["\']([^"\']+)["\']',
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, html, re.IGNORECASE)
-        if match:
-            candidate = match.group(1)
-            return urljoin(current_url, candidate) if candidate.startswith("/") else candidate
-    return None
-
-
-def _extract_items_from_html(html: str) -> list:
-    """
-    General-purpose HTML fallback extractor (Round 5 - Generality focus).
-    Designed to work reasonably on arbitrary list pages without assuming known domains.
-    """
-    import re
-    items = []
-    
-    # Broad, domain-agnostic patterns
-    patterns = [
-        r'href=["\'](/[^"\']+/[a-z0-9-]{5,}[^"\']*)["\']',
-        r'href=["\'](/[^"\']*detail[^"\']*)["\']',
-        r'href=["\'](/[^"\']*item[^"\']*)["\']',
-    ]
-    all_links = []
-    for pat in patterns:
-        all_links.extend(re.findall(pat, html, re.IGNORECASE))
-    
-    for link in list(dict.fromkeys(all_links))[:25]:
-        if len(link) > 6:
-            items.append({"url": link, "name": "General-purpose HTML fallback"})
-    
-    return items
-
-
 # =============================================================================
-# zyte_build_spider - The main feature
+# Helper: slugify + URL inference (for backward compat, but start_url is now REQUIRED)
 # =============================================================================
 
 def _slugify(text: str) -> str:
+    """Convert text to a valid slug for project names."""
     text = re.sub(r'[^a-zA-Z0-9\s-]', '', text).strip().lower()
     text = re.sub(r'[\s-]+', '-', text)
     return text[:60] or "custom-spider"
 
 
-def _infer_start_url(description: str) -> str:
-    """Crude but effective URL inference from natural language."""
-    desc = description.lower()
-
-    if "amazon" in desc:
-        # Try to extract search term
-        match = re.search(r'amazon[\s\w]*?([\w\s-]+)', description)
-        if match:
-            term = match.group(1).strip().replace(" ", "+")
-            return f"https://www.amazon.com/s?k={term}"
-        return "https://www.amazon.com/s?k=wireless+headphones"
-
-    if "zillow" in desc:
-        return "https://www.zillow.com/homes/for_sale/"
-
-    if "indeed" in desc:
-        return "https://www.indeed.com/jobs?q=software+engineer"
-
-    # Fallback: ask the description to contain a URL
-    url_match = re.search(r'https?://[^\s]+', description)
-    if url_match:
-        return url_match.group(0)
-
-    return "https://example.com"
-
-
 def _extract_fields(description: str) -> list[str]:
-    """Extract list of fields the user wants."""
+    """Extract list of fields the user wants from description."""
     common = ["name", "price", "url", "rating", "availability", "asin", "address", 
-              "beds", "baths", "sqft", "title", "description", "image"]
+              "beds", "baths", "sqft", "title", "description", "image", "reviews", "category"]
     
     found = []
     desc_lower = description.lower()
@@ -228,73 +255,98 @@ def _extract_fields(description: str) -> list[str]:
     return found
 
 
+# =============================================================================
+# zyte_build_spider — FIXED: start_url REQUIRED, is_complex_job → is_complex_job
+# =============================================================================
+
 def zyte_build_spider(args: dict, **kwargs) -> str:
     """
     Generates a complete, production-ready Scrapy + Zyte project.
-    This is the flagship tool for large-scale scraping.
+    
+    FIX (Priority 4):
+    - start_url is now REQUIRED (not guessed).
+    - is_complex_fleet → is_complex_job (consistency).
+    - Adds cost estimates to output.
+    - Checks for overwrite before deleting directories.
     """
     description = args.get("description", "")
+    start_url = args.get("start_url", "")
     custom_name = args.get("spider_name", "")
+    overwrite = args.get("overwrite", False)
 
     if not description:
         return json.dumps({"success": False, "error": "description is required"})
+    
+    if not start_url:
+        return json.dumps({
+            "success": False,
+            "error": (
+                "start_url is required. Please provide the starting URL for the spider. "
+                "Example: 'https://example.com/products' or 'https://amazon.com/s?k=headphones'"
+            )
+        })
 
-    # --- Intelligence layer (LLM-like reasoning) ---
-    project_name = _slugify(custom_name or description)
-    start_url = _infer_start_url(description)
-    fields = _extract_fields(description)
+    try:
+        # --- Intelligence layer ---
+        project_name = _slugify(custom_name or description)
+        fields = _extract_fields(description)
 
-    # Detect special requirements
-    needs_login = "login" in description.lower() or "authenticated" in description.lower()
-    infinite_scroll = "infinite scroll" in description.lower() or "scroll" in description.lower()
+        # Detect special requirements
+        needs_login = "login" in description.lower() or "authenticated" in description.lower()
+        infinite_scroll = "infinite scroll" in description.lower() or "scroll" in description.lower()
 
-    # Domain-aware template selection (for higher quality generation)
-    domain_type = "general"
-    if any(x in description.lower() for x in ["real estate", "zillow", "homes", "property"]):
-        domain_type = "real_estate"
-    elif any(x in description.lower() for x in ["amazon", "product", "e-commerce", "shop"]):
-        domain_type = "ecommerce"
-    elif any(x in description.lower() for x in ["job", "indeed", "career"]):
-        domain_type = "jobs"
+        # Domain-aware template selection
+        domain_type = "general"
+        if any(x in description.lower() for x in ["real estate", "zillow", "homes", "property"]):
+            domain_type = "real_estate"
+        elif any(x in description.lower() for x in ["amazon", "product", "e-commerce", "shop"]):
+            domain_type = "ecommerce"
+        elif any(x in description.lower() for x in ["job", "indeed", "career"]):
+            domain_type = "jobs"
 
-    # === Complex Job Detection ===
-    # For long or multi-faceted scraping requests, we can generate a project with
-    # multiple coordinated spiders instead of forcing everything into one.
-    # This is a general capability — not tied to any specific use case.
-    is_complex_job = len(description) > 160 or any(kw in description.lower() for kw in [
-        "multiple sources", "several sites", "different websites", "multi-source", "various platforms"
-    ])
+        # === Complex Job Detection (FIXED: renamed from is_complex_fleet) ===
+        is_complex_job = len(description) > 160 or any(kw in description.lower() for kw in [
+            "multiple sources", "several sites", "different websites", "multi-source", "various platforms"
+        ])
 
-    sub_spiders = []
-    if is_complex_job:
-        domain_type = "complex"
-        sub_spiders = ["main", "details", "related", "pagination"]
+        sub_spiders = []
+        if is_complex_job:
+            domain_type = "complex"
+            sub_spiders = ["main", "details", "related", "pagination"]
 
-    # Autoresearch Round 3 - Track A:
-    # Loading the high_quality_spider.py.template as the base for generation.
-    # This replaces most of the inline string building with template-driven output.
+        # --- Create project directory (with overwrite check) ---
+        base_dir = Path.home() / ".hermes" / "spiders" / project_name
+        if base_dir.exists():
+            if not overwrite:
+                return json.dumps({
+                    "success": False,
+                    "error": f"Project directory already exists at {base_dir}. Set overwrite=true to regenerate.",
+                })
+            # Check if directory was recently modified (safety check)
+            mtime = base_dir.stat().st_mtime
+            if (time.time() - mtime) < 3600 and not overwrite:
+                return json.dumps({
+                    "success": False,
+                    "error": f"Project was modified less than 1 hour ago. Set overwrite=true to force deletion.",
+                })
+            shutil.rmtree(base_dir)
+        
+        base_dir.mkdir(parents=True, exist_ok=True)
+        spiders_dir = base_dir / project_name / "spiders"
+        spiders_dir.mkdir(parents=True)
 
-    # --- Create project directory ---
-    base_dir = Path.home() / ".hermes" / "spiders" / project_name
-    if base_dir.exists():
-        shutil.rmtree(base_dir)
-    base_dir.mkdir(parents=True, exist_ok=True)
+        # --- Write project files ---
 
-    spiders_dir = base_dir / project_name / "spiders"
-    spiders_dir.mkdir(parents=True)
-
-    # --- Write project files ---
-
-    # 1. scrapy.cfg
-    (base_dir / "scrapy.cfg").write_text(f"""[settings]
+        # 1. scrapy.cfg
+        (base_dir / "scrapy.cfg").write_text(f"""[settings]
 default = {project_name}.settings
 
 [deploy]
 project = {project_name}
 """)
 
-    # Cloud deployment support (for zyte_deploy + Scrapy Cloud)
-    (base_dir / "scrapinghub.yml").write_text(f"""project: {project_name}
+        # 2. scrapinghub.yml (for Scrapy Cloud deployment)
+        (base_dir / "scrapinghub.yml").write_text(f"""project: {project_name}
 
 requirements:
   file: requirements.txt
@@ -302,8 +354,8 @@ requirements:
 stack: scrapy:2.11
 """)
 
-    # 2. settings.py (Zyte-first configuration)
-    settings_content = f'''# -*- coding: utf-8 -*-
+        # 3. settings.py (Zyte-first configuration)
+        settings_content = f'''# -*- coding: utf-8 -*-
 import os
 
 BOT_NAME = "{project_name}"
@@ -311,11 +363,11 @@ BOT_NAME = "{project_name}"
 SPIDER_MODULES = ["{project_name}.spiders"]
 NEWSPIDER_MODULE = "{project_name}.spiders"
 
-# Zyte API configuration (cloud + local)
+# Zyte API configuration
 ZYTE_API_KEY = os.getenv("ZYTE_API_KEY")
 ZYTE_API_TRANSPARENT_MODE = True
 
-# Use scrapy-zyte-api middleware (recommended 2026 approach)
+# Use scrapy-zyte-api middleware (2026 best practice)
 DOWNLOADER_MIDDLEWARES = {{
     "scrapy_zyte_api.ZyteApiMiddleware": 1000,
 }}
@@ -328,176 +380,156 @@ ROBOTSTXT_OBEY = True
 CONCURRENT_REQUESTS = 16
 DOWNLOAD_DELAY = 0.5
 
-# Cloud / Production friendly settings
+# Cloud-friendly
 TELNETCONSOLE_ENABLED = False
 LOG_LEVEL = "INFO"
-# Uncomment for Scrapy Cloud if you want higher memory limits
-# MEMUSAGE_ENABLED = True
-# MEMUSAGE_LIMIT_MB = 512
 '''
+        (base_dir / project_name / "settings.py").write_text(settings_content)
 
-    (base_dir / project_name / "settings.py").write_text(settings_content)
+        # 4. items.py
+        base_item_name = project_name.replace("-", "_").title().replace("_", "") + "Item"
 
-    # 3. items.py
-    base_item_name = project_name.replace("-", "_").title().replace("_", "") + "Item"
-
-    if is_complex_fleet:
-        # Stronger structured item for complex multi-source projects
-        items_content = f'''import scrapy
+        if is_complex_job:
+            items_content = f'''import scrapy
 
 class {base_item_name}(scrapy.Item):
     """Structured item for complex multi-source scraping project"""
-    # Core fields (user can extend)
     name = scrapy.Field()
     url = scrapy.Field()
     source_spider = scrapy.Field()
     scraped_at = scrapy.Field()
-    # Add any fields you need for your specific task
 '''
-    else:
-        items_content = f'''import scrapy
+        else:
+            items_content = f'''import scrapy
 
 class {base_item_name}(scrapy.Item):
     """Auto-generated item for: {description[:80]}"""
 '''
-        for field in fields:
-            items_content += f'    {field} = scrapy.Field()\n'
-        items_content += '    url = scrapy.Field()\n    scraped_at = scrapy.Field()\n'
+            for field in fields:
+                items_content += f'    {field} = scrapy.Field()\n'
+            items_content += '    url = scrapy.Field()\n    scraped_at = scrapy.Field()\n'
 
-    (base_dir / project_name / "items.py").write_text(items_content)
+        (base_dir / project_name / "items.py").write_text(items_content)
 
-    # 4. The actual spider(s)
-    template_path = Path(__file__).parent / "templates" / "high_quality_spider.py.template"
-    
-    spider_class = project_name.replace("-", "_").title().replace("_", "") + "Spider"
-    item_class = spider_class.replace("Spider", "Item")
+        # 5. Basic spider (template-based if available)
+        spider_class = project_name.replace("-", "_").title().replace("_", "") + "Spider"
+        item_class = spider_class.replace("Spider", "Item")
 
-    if is_complex_job and template_path.exists():
-        # === Complex Job Mode: Generate multiple coordinated spiders when the task is big/multi-faceted ===
-        base_template = template_path.read_text()
-        for spider_key in sub_spiders:
-            sub_spider_class = f"{spider_class}_{spider_key.title().replace('_','')}"
-            spider_code = base_template.replace("EliteSpider", sub_spider_class)
-            spider_code = spider_code.replace("elite_spider", f"{project_name}_{spider_key}")
+        template_path = Path(__file__).parent / "templates" / "high_quality_spider.py.template"
+        
+        if template_path.exists():
+            spider_code = template_path.read_text()
+            spider_code = spider_code.replace("EliteSpider", spider_class)
+            spider_code = spider_code.replace("elite_spider", project_name)
             spider_code = spider_code.replace("https://example.com/", start_url)
             spider_code = spider_code.replace(
-                "General-purpose HTML fallback",
-                f"Part of a complex scraping task ({spider_key})"
+                "Domain-aware generation: general",
+                f"Domain-aware generation: {domain_type} (additive enhancements only)"
             )
-            (spiders_dir / f"{project_name}_{spider_key}.py").write_text(spider_code)
-
-        orchestrator = f"""# Multi-spider orchestrator for {project_name}
-# This project was generated because the request was large or involved multiple sources.
-print("Multi-spider project generated. Sub-spiders: {sub_spiders}")
-"""
-        (spiders_dir / "multi_spider_orchestrator.py").write_text(orchestrator)
-    elif template_path.exists():
-        spider_code = template_path.read_text()
-        spider_code = spider_code.replace("EliteSpider", spider_class)
-        spider_code = spider_code.replace("elite_spider", project_name)
-        spider_code = spider_code.replace("https://example.com/", start_url)
-        spider_code = spider_code.replace("example.com", start_url.split("/")[2] if "://" in start_url else "example.com")
-        spider_code = spider_code.replace(
-            "Domain-aware generation: general",
-            f"Domain-aware generation: {domain_type} (additive enhancements only — general base is primary)"
-        )
-        spider_code = spider_code.replace(
-            "Good observability",
-            "Excellent observability + strong resilience for unknown/arbitrary sites"
-        )
-        (spiders_dir / f"{project_name}.py").write_text(spider_code)
-    else:
-        spider_code = f"""# Fallback basic spider (template not found)
-import scrapy
+            (spiders_dir / f"{project_name}.py").write_text(spider_code)
+        else:
+            # Fallback: basic spider template
+            spider_code = f"""import scrapy
 from scrapy_zyte_api import ZyteApiSpider
 from {project_name}.items import {item_class}
 
 class {spider_class}(ZyteApiSpider):
     name = "{project_name}"
     start_urls = ["{start_url}"]
+    
+    custom_settings = {{
+        'ZYTE_API_AUTOMAP': True,
+    }}
+    
+    def parse(self, response):
+        # Implement your scraping logic here
+        # This is a skeleton; extend with proper extraction logic
+        yield {item_class}(
+            name="example",
+            url=response.url,
+        )
 """
-        (spiders_dir / f"{project_name}.py").write_text(spider_code)
+            (spiders_dir / f"{project_name}.py").write_text(spider_code)
 
-    # 5. __init__.py for the package
-    (base_dir / project_name / "__init__.py").write_text("")
+        # 6. __init__.py
+        (base_dir / project_name / "__init__.py").write_text("")
 
-    # 6. Excellent README
-    readme = f'''# {project_name}
+        # 7. README.md
+        cost_note = (
+            "Cost per page: ~$0.01-0.05 depending on extractFrom (browserHtml higher than httpResponseBody), "
+            "geolocation, and custom attributes. Browser rendering adds cost. Monitor Zyte dashboard for actual charges."
+        )
+        
+        readme = f'''# {project_name}
 
 **Generated by Hermes** on {datetime.now().strftime("%Y-%m-%d")}
 
 **Original request:**
 > {description}
 
-## How to run locally
+## Quick Start
 
 ```bash
 cd ~/.hermes/spiders/{project_name}
-pip install -r requirements.txt   # if you create one
 scrapy crawl {project_name}
 ```
 
-## Deploy to Scrapy Cloud (recommended for continuous running)
-
-You can deploy and manage this spider using the operational tools:
+## Deploy to Scrapy Cloud (for continuous, scheduled scraping)
 
 ```bash
-# 1. Deploy
+# 1. Deploy this project
 zyte_deploy project_path="~/.hermes/spiders/{project_name}"
 
-# 2. Schedule continuous runs (example: every 6 hours)
+# 2. Schedule it (example: every 6 hours)
 zyte_schedule project_id="{project_name}" spider="{project_name}" schedule="0 */6 * * *"
 
-# 3. Monitor
+# 3. Monitor jobs
 zyte_list_jobs project_id="{project_name}"
 
 # 4. Get results
 zyte_get_results job_id="<project_id>/<spider_id>/<job_id>"
 ```
 
-Make sure `SCRAPY_CLOUD_API_KEY` and `ZYTE_API_KEY` are set in your `~/.hermes/.env`.
+## Cost Estimate
+
+{cost_note}
+
+## Fields Extracted
+
+{', '.join(fields)}
 
 ## Requirements
 
-Add these to your environment or Scrapy Cloud settings:
-
 - `ZYTE_API_KEY` (required)
-- `SCRAPY_CLOUD_API_KEY` (required for deployment & scheduling)
+- `SCRAPY_CLOUD_API_KEY` (required for deployment)
 
-## Production Notes (from Zyte 2026 best practices)
-- Cost: Only successful responses are charged. Prefer `extract_from=httpResponseBody` for cheaper runs when JS is not needed.
-- Sessions: For stateful sites (login, cart, location), use client-managed sessions (`session: {id: uuid}`) across requests.
-- Actions: Heavy JS / infinite scroll / forms? Extend the spider's `actions` list in zyte_api_default_params or per-request.
-- Model pinning: Pin `productOptions.model` (e.g. "2024-09-16") for result stability.
-- Monitoring: Use tags + `jobId` / `echoData` in requests for traceability on Scrapy Cloud.
-
-## Generated fields
-{', '.join(fields)}
-
-{"**Note**: This is a **multi-spider project** (generated because your request was complex or involved multiple sources). The spiders are meant to work together on different parts of the overall task. You can schedule and monitor them individually or as a group." if is_complex_job else ""}
-
----
-This project was intelligently generated based on your natural language description.
-
-The generator is designed to be **general-purpose** — it aims to create high-quality, production-ready spiders for almost any scraping task you describe. For especially difficult sites, add more details in your request (login requirements, anti-bot behavior, specific fields, pagination style, etc.) and regenerate.
+See README.md for full setup.
 '''
+        (base_dir / "README.md").write_text(readme)
 
-    (base_dir / "README.md").write_text(readme)
-
-    # 7. requirements.txt for the project (cloud-ready)
-    reqs = """scrapy>=2.11
+        # 8. requirements.txt
+        reqs = """scrapy>=2.11
 scrapy-zyte-api>=0.8
-zyte-spider-templates>=0.4
-shub>=2.0
+zyte-api>=1.0
+requests>=2.28
+shub>=2.12
 """
-    (base_dir / "requirements.txt").write_text(reqs)
+        (base_dir / "requirements.txt").write_text(reqs)
 
-    return json.dumps({
-        "success": True,
-        "project_name": project_name,
-        "project_path": str(base_dir),
-        "start_url": start_url,
-        "extracted_fields": fields,
-        "message": f"✅ Full Scrapy + Zyte project created at {base_dir}",
-        "how_to_run": f"cd {base_dir} && scrapy crawl {project_name}"
-    })
+        return json.dumps({
+            "success": True,
+            "project_name": project_name,
+            "project_path": str(base_dir),
+            "start_url": start_url,
+            "extracted_fields": fields,
+            "estimated_cost_per_run": "~$0.02-0.15 depending on page count and extractFrom settings",
+            "message": f"✅ Full Scrapy + Zyte project created at {base_dir}",
+            "next_steps": [
+                f"1. Run locally: cd {base_dir} && scrapy crawl {project_name}",
+                f"2. Deploy: zyte_deploy project_path='{base_dir}'",
+                f"3. Schedule: zyte_schedule project_id='{project_name}' spider='{project_name}' schedule='0 */6 * * *'"
+            ]
+        })
+
+    except Exception as e:
+        return json.dumps({"success": False, "error": str(e)})

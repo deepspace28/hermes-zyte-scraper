@@ -1,14 +1,12 @@
-"""Hermes plugin: hermes-zyte-scraper — Zyte extraction + intelligent spider generation + Karpathy-style autoresearch."""
+"""Hermes plugin: hermes-zyte-scraper — Zyte extraction + intelligent spider generation."""
 
 from . import schemas, tools
-from .autoresearch import autoresearch
 from .operations import (
     zyte_deploy,
     zyte_list_jobs,
     zyte_get_results,
     zyte_schedule,
 )
-
 
 def register(ctx) -> bool:
     # Existing extraction tool (with pagination support)
@@ -31,17 +29,6 @@ def register(ctx) -> bool:
         requires_env=["ZYTE_API_KEY"],
         description="Generate complete Scrapy + Zyte projects from natural language",
         emoji="🕸️",
-    )
-
-    # Andrej Karpathy-style autonomous research (no GPU required)
-    ctx.register_tool(
-        name="autoresearch",
-        toolset="zyte",
-        schema=schemas.AUTORESEARCH,
-        handler=autoresearch,
-        requires_env=["ZYTE_API_KEY"],
-        description="Karpathy-style deep autonomous research using high-quality scraping + LLM reasoning",
-        emoji="🧠",
     )
 
     # === Operational Layer (Phase 4) ===

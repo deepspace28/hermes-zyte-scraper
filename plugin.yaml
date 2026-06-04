@@ -1,5 +1,5 @@
 name: hermes-zyte-scraper
-version: "0.5.0"
+version: "0.6.0"
 description: |
   Elite-grade Zyte integration for Hermes.
   
@@ -7,7 +7,6 @@ description: |
   - Intelligent spider generation from natural language (zyte_build_spider)
   - High-quality, resilient multi-page extraction on the hardest sites (zyte_extract)
   - Production-ready Scrapy + Zyte projects (cloud + local)
-  - Andrej Karpathy-style autonomous research (autoresearch)
   - Full operational layer: Deploy & manage continuous spiders on Scrapy Cloud (zyte_deploy, zyte_schedule, zyte_list_jobs, zyte_get_results)
   
   Goal: Let agents describe what to scrape → generate elite spiders → deploy them to run continuously on Scrapy Cloud.
@@ -15,7 +14,6 @@ author: "Hermes + User"
 provides_tools:
   - zyte_extract
   - zyte_build_spider
-  - autoresearch
   # Operational Layer (Phase 4)
   - zyte_deploy
   - zyte_list_jobs

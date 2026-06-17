@@ -73,7 +73,15 @@ class ScrapyCloudClient:
         if self.dry_run:
             log_msg = f"[DRY-RUN] {method} {url} with kwargs: {kwargs}"
             print(log_msg)
-            return type('obj', (object,), {'status_code': 200, 'text': '{}', 'json': lambda: {}})()
+            return type(
+                "DryRunResponse",
+                (object,),
+                {
+                    "status_code": 200,
+                    "text": '{"projects": [{"id": 1, "name": "dry-run"}]}',
+                    "json": lambda self=None, **kwargs: {"projects": [{"id": 1, "name": "dry-run"}]},
+                },
+            )()
         
         for attempt in range(max_retries):
             try:
@@ -148,12 +156,17 @@ stack: scrapy:2.11
                 "stdout": "[DRY-RUN] Deploy skipped",
             }
         
+        deploy_env = os.environ.copy()
+        deploy_env["SHUB_API_KEY"] = self.api_key
+        deploy_env["SCRAPY_CLOUD_API_KEY"] = self.api_key
+
         result = subprocess.run(
             ["shub", "deploy"],
             cwd=str(path),
             capture_output=True,
             text=True,
-            timeout=180
+            timeout=180,
+            env=deploy_env,
         )
 
         if result.returncode != 0:

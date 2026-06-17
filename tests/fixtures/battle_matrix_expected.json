@@ -1,0 +1,16 @@
+{
+  "version": "1.3.0",
+  "recorded": "2026-06-17",
+  "minimum_pass": {
+    "books.toscrape.com": {"pages_scraped_min": 5, "total_items_min": 100, "quality_min": 1.0},
+    "indeed_jobs_seattle": {"pages_scraped_min": 2, "total_items_min": 30, "quality_min": 0.9},
+    "amazon_search": {"pages_scraped_min": 2, "total_items_min": 40, "quality_min": 0.9},
+    "zillow_seattle": {"pages_scraped_min": 2, "total_items_min": 20, "quality_min": 0.5}
+  },
+  "cloud_e2e": {
+    "project_id": "867424",
+    "job_items_min": 30,
+    "required_fields": ["listing_url", "zpid"]
+  },
+  "notes": "Live battle matrix recorded in battle_matrix_results_v2.json after P0 pagination fix."
+}

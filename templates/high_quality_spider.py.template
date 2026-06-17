@@ -5,14 +5,13 @@ This is the target quality level we are moving the generator toward.
 """
 
 import scrapy
-from scrapy_zyte_api import ZyteApiSpider
 from urllib.parse import urljoin
 import logging
 
 logger = logging.getLogger(__name__)
 
 
-class EliteSpider(ZyteApiSpider):
+class EliteSpider(scrapy.Spider):
     """
     Reference implementation for top-tier generated spiders.
     Features:
@@ -27,17 +26,11 @@ class EliteSpider(ZyteApiSpider):
     allowed_domains = ["example.com"]
     start_urls = ["https://example.com/"]
 
-    zyte_api_default_params = {
-        "browserHtml": True,
-        "productList": True,
-    }
-
     # General-purpose defaults (works for arbitrary sites)
     # Domain-specific enhancements are applied on top when detected
     _general_pagination_strategies = ["zyte_next", "html_links", "url_increment"]
 
     custom_settings = {
-        "ZYTE_API_TRANSPARENT_MODE": True,
         "CONCURRENT_REQUESTS": 8,
         "DOWNLOAD_DELAY": 0.8,
     }
@@ -45,6 +38,10 @@ class EliteSpider(ZyteApiSpider):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.seen = set()
+
+    def start_requests(self):
+        for url in self.start_urls:
+            yield scrapy.Request(url, callback=self.parse, meta={"page": 1})
 
     def parse(self, response):
         zyte_data = getattr(response, "raw_api_response", {}) or {}

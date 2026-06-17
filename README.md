@@ -1,6 +1,6 @@
 # hermes-zyte-scraper
 
-Production-grade Zyte + Scrapy Cloud integration for Hermes agents.
+Production-grade Zyte + Scrapy Cloud integration for Hermes agents (v1.3.0).
 
 Describe a scraping task in natural language, extract data via Zyte API, generate production Scrapy spiders, deploy to Scrapy Cloud, schedule runs, and retrieve stored results.
 
@@ -19,25 +19,35 @@ Set credentials in `~/.hermes/.env`:
 |----------|---------|
 | `ZYTE_API_KEY` | Zyte API extraction and spider runs |
 | `SCRAPY_CLOUD_API_KEY` | Deploy, schedule, list jobs, fetch results |
+| `SCRAPY_CLOUD_PROJECT_ID` | Numeric Scrapy Cloud project ID (e.g. `867424`) |
+
+**Scrapy Cloud:** Also set `ZYTE_API_KEY` in your project's environment variables in the [Zyte dashboard](https://app.zyte.com).
 
 ## Tools
 
 | Tool | When to use |
 |------|-------------|
-| `zyte_extract` | Quick one-off or moderate multi-page extraction |
+| `zyte_extract` | Quick one-off or moderate multi-page extraction (auto schema inference) |
 | `zyte_build_spider` | Generate a full Scrapy + Zyte project (requires `start_url`) |
 | `zyte_deploy` | Deploy generated project to Scrapy Cloud |
-| `zyte_schedule` | Run spider once or on a cron schedule |
+| `zyte_schedule` | Run spider once or on a cron schedule (uses `run.json` API) |
 | `zyte_list_jobs` | Monitor Scrapy Cloud jobs |
 | `zyte_get_results` | Pull items from Scrapy Cloud storage |
 
 Load the workflow skill in Hermes: `skill_view("hermes-zyte-scraper:zyte-scraping")`
 
+## zyte_extract highlights (v1.3.0)
+
+- **Auto schema inference** — Indeed → `jobPostingNavigation`, Zillow/Amazon → `productList`
+- **Multi-page pagination** — browserHtml + robust next-page detection
+- **Sessions** — optional `session_id` for cookie/IP reuse
+- **Custom attributes** — `custom_attributes="address,price,beds,baths"` per Zyte docs
+
 ## End-to-end example
 
 ```
-# 1. Quick extraction
-zyte_extract url="https://books.toscrape.com/" max_pages=2
+# 1. Quick extraction (schema inferred from URL)
+zyte_extract url="https://books.toscrape.com/" max_pages=5
 
 # 2. Build a production spider
 zyte_build_spider \
@@ -49,39 +59,32 @@ zyte_build_spider \
 zyte_deploy project_path="~/.hermes/spiders/books-demo"
 
 # 4. Schedule a one-time run
-zyte_schedule project_id="books-demo" spider="books-demo"
+zyte_schedule project_id="867424" spider="books-demo"
 
 # 5. Monitor and fetch results
-zyte_list_jobs project_id="books-demo"
-zyte_get_results job_id="<project>/<spider>/<job>"
+zyte_list_jobs project_id="867424"
+zyte_get_results job_id="867424/books-demo/1"
 ```
 
 Use `dry_run=true` on operational tools to validate without API calls.
 
-## Project layout
+## Battle testing
 
-```
-hermes-zyte-scraper/
-├── plugin.yaml
-├── __init__.py
-├── schemas.py
-├── tools.py
-├── operations.py
-├── requirements.txt
-├── skills/zyte-scraping/SKILL.md
-├── templates/high_quality_spider.py.template
-└── tests/test_tools.py
-```
+Recorded minimums: `tests/fixtures/battle_matrix_expected.json`
 
-Generated spiders are written to `~/.hermes/spiders/<name>/`.
+Run live matrix locally (requires `ZYTE_API_KEY`):
+
+```bash
+python scripts/run_battle_matrix.py
+```
 
 ## Development
 
 ```bash
 pip install -r requirements.txt pytest
-pytest tests/ -v
+python -m pytest tests/ -v
 ```
 
 ## Cost notes
 
-Zyte charges per successful API response. Browser rendering, actions, and large multi-page crawls increase cost. Set spending limits in the Zyte dashboard.
+Zyte charges per successful API response. Browser rendering, sessions, custom attributes, and large multi-page crawls increase cost. Set spending limits in the Zyte dashboard.

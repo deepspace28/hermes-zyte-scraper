@@ -1,14 +1,11 @@
 name: hermes-zyte-scraper
-version: "1.1.0"
+version: "1.2.0"
 description: |
-  Production-grade Zyte integration for Hermes.
-  
-  Features:
-  - Resilient multi-page extraction with tenacity retries (zyte_extract)
-  - Powerful natural language → full Scrapy spider generation (zyte_build_spider)
-  - Full operational tools for Scrapy Cloud (deploy, schedule, results)
-  
-  Battle-tested architecture with clean separation of concerns.
+  Production-grade Zyte + Scrapy Cloud integration for Hermes agents.
+
+  - zyte_extract: resilient multi-page extraction via Zyte API
+  - zyte_build_spider: natural language to full Scrapy + Zyte projects
+  - zyte_deploy / zyte_schedule / zyte_list_jobs / zyte_get_results: Scrapy Cloud lifecycle
 author: "Hermes + DeepSpace"
 provides_tools:
   - zyte_extract
@@ -19,10 +16,12 @@ provides_tools:
   - zyte_schedule
 requires_env:
   - name: ZYTE_API_KEY
-    description: "Zyte API key"
+    description: "Zyte API key for extraction and spider runs"
+    url: "https://app.zyte.com/o/zyte-api/api-access"
     secret: true
   - name: SCRAPY_CLOUD_API_KEY
-    description: "Scrapy Cloud API key"
+    description: "Scrapy Cloud API key for deploy, schedule, and results"
+    url: "https://app.zyte.com/o/settings/apikey"
     secret: true
 kind: standalone
-tags: [zyte, scraping, spider, production, tenacity, battle-tested]
+tags: [zyte, scraping, spider, production, scrapy-cloud]

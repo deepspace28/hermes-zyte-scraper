@@ -15,10 +15,33 @@ ZYTE_EXTRACT = {
             "schema": {
                 "type": "string",
                 "description": (
-                    "Primary extraction type: productList, product, articleList, "
-                    "article, pageContent, etc."
+                    "Zyte auto-extract type: productList, jobPostingNavigation, "
+                    "articleList, pageContent, or 'auto' (inferred from URL)."
                 ),
-                "default": "productList",
+                "default": "auto",
+            },
+            "auto_schema": {
+                "type": "boolean",
+                "description": "When true, infer schema from URL (Indeed→jobs, Zillow→listings).",
+                "default": True,
+            },
+            "custom_attributes": {
+                "type": "string",
+                "description": (
+                    "Comma-separated fields or JSON schema for Zyte customAttributes "
+                    "(e.g. 'address,price,beds,baths')."
+                ),
+                "default": "",
+            },
+            "custom_attributes_method": {
+                "type": "string",
+                "description": "customAttributes method: extract (cheaper) or generate.",
+                "default": "extract",
+            },
+            "session_id": {
+                "type": "string",
+                "description": "Optional Zyte session UUID for cookie/IP reuse across pages.",
+                "default": "",
             },
             "max_pages": {
                 "type": "integer",
@@ -169,7 +192,15 @@ ZYTE_SCHEDULE = {
     "parameters": {
         "type": "object",
         "properties": {
-            "project_id": {"type": "string", "description": "Scrapy Cloud project ID or name."},
+            "project_id": {
+                "type": "string",
+                "description": "Scrapy Cloud numeric project ID (e.g. 867424).",
+            },
+            "priority": {
+                "type": "integer",
+                "description": "Job priority 0-4 (default 2).",
+                "default": 2,
+            },
             "spider": {"type": "string", "description": "Spider name to run."},
             "schedule": {
                 "type": "string",

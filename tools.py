@@ -1,6 +1,7 @@
 """Tool handlers for Zyte extraction and spider generation."""
 
 import json
+import os
 import re
 import shutil
 import time
@@ -10,6 +11,13 @@ from pathlib import Path
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential_jitter
 from zyte_api import RequestError
 from zyte_api import ZyteAPI
+
+from zyte_helpers import (
+    build_custom_attributes_payload,
+    extract_items_from_html,
+    infer_schema,
+    parse_auto_extract_items,
+)
 
 
 def _is_retryable_zyte_error(exc: BaseException) -> bool:
@@ -31,7 +39,26 @@ def _zyte_get(client: ZyteAPI, payload: dict) -> dict:
     return client.get(payload, endpoint="extract")
 
 
+def _current_page_number(url: str) -> int:
+    match = re.search(r"page[=-](\d+)", url, re.IGNORECASE)
+    if match:
+        return int(match.group(1))
+    if re.search(r"page=(\d+)", url, re.IGNORECASE):
+        return int(re.search(r"page=(\d+)", url, re.IGNORECASE).group(1))
+    return 1
+
+
+def _candidate_page_number(url: str) -> int | None:
+    match = re.search(r"page[=-](\d+)", url, re.IGNORECASE)
+    if match:
+        return int(match.group(1))
+    match = re.search(r"[?&]page=(\d+)", url, re.IGNORECASE)
+    return int(match.group(1)) if match else None
+
+
 def _find_next_page_in_response(resp: dict, current_url: str) -> str | None:
+    from urllib.parse import urljoin
+
     next_info = resp.get("nextPage") or {}
     if isinstance(next_info, dict) and next_info.get("url"):
         return next_info["url"]
@@ -40,50 +67,53 @@ def _find_next_page_in_response(resp: dict, current_url: str) -> str | None:
     if not html:
         return None
 
+    current_page = _current_page_number(current_url)
     patterns = [
         r'href=["\']([^"\']*page=\d+[^"\']*)["\'][^>]*rel=["\']?next',
-        r'class=["\'][^"\']*next[^"\']*["\'][^>]*href=["\']([^"\']+)["\']',
+        r'class=["\'][^"\']*(?:next|pagination-next|page-next)[^"\']*["\'][^>]*href=["\']([^"\']+)["\']',
+        r'aria-label=["\'][^"\']*next[^"\']*["\'][^>]*href=["\']([^"\']+)["\']',
+        r'href=["\']([^"\']+)["\'][^>]*class=["\'][^"\']*(?:next|pagination-next|page-next)[^"\']*["\']',
+        r'href=["\']([^"\']*(?:page-\d+|/page/\d+)[^"\']*)["\']',
         r'href=["\']([^"\']*\?page=\d[^"\']*)["\']',
+        r'href=["\']([^"\']*&page=\d[^"\']*)["\']',
     ]
     for pattern in patterns:
-        match = re.search(pattern, html, re.IGNORECASE)
-        if match:
+        for match in re.finditer(pattern, html, re.IGNORECASE):
             candidate = match.group(1)
             if candidate.startswith("/"):
-                from urllib.parse import urljoin
-
-                return urljoin(current_url, candidate)
+                candidate = urljoin(current_url, candidate)
+            if candidate == current_url or len(candidate) <= 6:
+                continue
+            page_num = _candidate_page_number(candidate)
+            if page_num is not None and page_num <= current_page:
+                continue
             return candidate
     return None
 
 
-def _extract_items_from_html(html: str) -> list:
-    items = []
-    patterns = [
-        r'href=["\'](/[^"\']+/[a-z0-9-]{5,}[^"\']*)["\']',
-        r'href=["\'](/[^"\']*detail[^"\']*)["\']',
-        r'href=["\'](/[^"\']*item[^"\']*)["\']',
-        r'href=["\'](/[^"\']*product[^"\']*)["\']',
-    ]
-    all_links = []
-    for pat in patterns:
-        all_links.extend(re.findall(pat, html, re.IGNORECASE))
+def _apply_zyte_session(payload: dict, args: dict) -> None:
+    session_id = args.get("session_id", "").strip()
+    if session_id:
+        payload["session"] = {"id": session_id}
 
-    seen = set()
-    for link in all_links:
-        if link not in seen and len(link) > 6:
-            seen.add(link)
-            items.append({"url": link, "name": "General-purpose HTML fallback"})
-            if len(items) >= 25:
-                break
-    return items
+
+def _apply_custom_attributes(payload: dict, args: dict, schema: str) -> None:
+    custom = build_custom_attributes_payload(args.get("custom_attributes"))
+    if custom:
+        payload["customAttributes"] = custom
+        payload["customAttributesOptions"] = {"method": args.get("custom_attributes_method", "extract")}
 
 
 def zyte_extract(args: dict, **kwargs) -> str:
     url = args.get("url")
     max_pages = int(args.get("max_pages", 5))
     extract_from = args.get("extract_from", "browserHtml")
-    schema = args.get("schema", "productList")
+    auto_schema = bool(args.get("auto_schema", True))
+    schema = infer_schema(
+        url,
+        schema=args.get("schema", "auto"),
+        auto_schema=auto_schema,
+    )
 
     if not url:
         return json.dumps({"success": False, "error": "url is required"})
@@ -94,9 +124,13 @@ def zyte_extract(args: dict, **kwargs) -> str:
         current_url = url
         page = 1
         seen_urls = set()
+        visited_pages = set()
         total_cost_estimate = 0.0
 
         while page <= max_pages and current_url:
+            if current_url in visited_pages:
+                break
+            visited_pages.add(current_url)
             page_result = {
                 "page": page,
                 "url": current_url,
@@ -108,37 +142,42 @@ def zyte_extract(args: dict, **kwargs) -> str:
             items: list = []
 
             try:
-                payload1 = {
-                    "url": current_url,
-                    schema: True,
-                    "extractFrom": extract_from,
-                }
+                payload1: dict = {"url": current_url, schema: True}
+                if extract_from == "httpResponseBody":
+                    payload1["extractFrom"] = extract_from
+                else:
+                    payload1["browserHtml"] = True
                 if args.get("geolocation"):
                     payload1["geolocation"] = args["geolocation"]
+                _apply_zyte_session(payload1, args)
+                _apply_custom_attributes(payload1, args, schema)
 
                 resp1 = _zyte_get(client, payload1)
-                auto_data = resp1.get(schema, {})
-                if isinstance(auto_data, dict):
-                    items = auto_data.get("products", auto_data.get("items", []))
-                else:
-                    items = auto_data if isinstance(auto_data, list) else []
+                items = parse_auto_extract_items(schema, resp1.get(schema, {}))
 
                 total_cost_estimate += 0.01
                 page_result["extraction_method"] = f"auto-extract ({schema})"
             except Exception as exc:
                 page_result["extraction_error"] = str(exc)
 
-            if len(items) < 3:
+            if len(items) < 3 and resp1.get("browserHtml"):
+                fallback_items = extract_items_from_html(resp1.get("browserHtml", ""), current_url)
+                if fallback_items:
+                    items = fallback_items
+                    page_result["extraction_method"] = "browserHtml + domain HTML parsing"
+            elif len(items) < 3:
                 try:
                     payload2 = {"url": current_url, "browserHtml": True}
                     if args.get("geolocation"):
                         payload2["geolocation"] = args["geolocation"]
+                    _apply_zyte_session(payload2, args)
 
                     resp2 = _zyte_get(client, payload2)
-                    fallback_items = _extract_items_from_html(resp2.get("browserHtml", ""))
+                    resp1 = {**resp1, **resp2}
+                    fallback_items = extract_items_from_html(resp2.get("browserHtml", ""), current_url)
                     if fallback_items:
                         items = fallback_items
-                        page_result["extraction_method"] = "browserHtml + custom HTML parsing"
+                        page_result["extraction_method"] = "browserHtml + domain HTML parsing"
                         total_cost_estimate += 0.01
                 except Exception as exc:
                     page_result["fallback_error"] = str(exc)
@@ -157,7 +196,9 @@ def zyte_extract(args: dict, **kwargs) -> str:
 
             next_url = _find_next_page_in_response(resp1, current_url)
             if next_url:
-                current_url = next_url
+                from urllib.parse import urljoin
+
+                current_url = urljoin(current_url, next_url)
             elif "page=" in current_url:
                 current_url = re.sub(
                     r"page=(\d+)",
@@ -193,6 +234,8 @@ def zyte_extract(args: dict, **kwargs) -> str:
                     "(Zyte charges only for successful responses)"
                 ),
                 "extract_from_used": extract_from,
+                "schema_used": schema,
+                "auto_schema": auto_schema,
                 "recommendations": recommendations,
                 "results": results,
             }
@@ -289,13 +332,19 @@ def zyte_build_spider(args: dict, **kwargs) -> str:
         base_dir.mkdir(parents=True, exist_ok=True)
         spiders_dir = base_dir / project_name / "spiders"
         spiders_dir.mkdir(parents=True)
+        (spiders_dir / "__init__.py").write_text("")
 
         (base_dir / "scrapy.cfg").write_text(
             f"[settings]\ndefault = {project_name}.settings\n\n[deploy]\nproject = {project_name}\n"
         )
+        cloud_project = os.getenv("SCRAPY_CLOUD_PROJECT_ID", project_name)
         (base_dir / "scrapinghub.yml").write_text(
-            f"project: {project_name}\n\nrequirements:\n  file: requirements.txt\n\nstack: scrapy:2.11\n"
+            f"project: {cloud_project}\n\nrequirements:\n  file: requirements.txt\n\n"
+            f"stack: scrapy:2.11\n"
         )
+
+        zyte_schema = "jobPostingNavigation" if domain_type == "jobs" else "productList"
+        obey_robots = "False" if domain_type in ("real_estate", "jobs") else "True"
 
         settings_content = f'''# -*- coding: utf-8 -*-
 import os
@@ -307,15 +356,19 @@ NEWSPIDER_MODULE = "{project_name}.spiders"
 
 ZYTE_API_KEY = os.getenv("ZYTE_API_KEY")
 ZYTE_API_TRANSPARENT_MODE = True
+ZYTE_API_DEFAULT_PARAMS = {{
+    "browserHtml": True,
+    "{zyte_schema}": True,
+}}
 
-DOWNLOADER_MIDDLEWARES = {{
-    "scrapy_zyte_api.ZyteApiMiddleware": 1000,
+ADDONS = {{
+    "scrapy_zyte_api.Addon": 500,
 }}
 REQUEST_FINGERPRINTER_IMPLEMENTATION = "2.7"
 TWISTED_REACTOR = "twisted.internet.asyncioreactor.AsyncioSelectorReactor"
 FEED_EXPORT_ENCODING = "utf-8"
 
-ROBOTSTXT_OBEY = True
+ROBOTSTXT_OBEY = {obey_robots}
 CONCURRENT_REQUESTS = 16
 DOWNLOAD_DELAY = 0.5
 TELNETCONSOLE_ENABLED = False
@@ -365,12 +418,15 @@ class {base_item_name}(scrapy.Item):
         else:
             (spiders_dir / f"{project_name}.py").write_text(
                 f'''import scrapy
-from scrapy_zyte_api import ZyteApiSpider
 from {project_name}.items import {item_class}
 
-class {spider_class}(ZyteApiSpider):
+class {spider_class}(scrapy.Spider):
     name = "{project_name}"
     start_urls = ["{start_url}"]
+
+    def start_requests(self):
+        for url in self.start_urls:
+            yield scrapy.Request(url, callback=self.parse)
 '''
             )
 
@@ -396,10 +452,12 @@ scrapy crawl {project_name}
 
 ## Scrapy Cloud
 
+Set `ZYTE_API_KEY` in your Scrapy Cloud project environment variables (dashboard → project → settings).
+
 ```bash
 zyte_deploy project_path="~/.hermes/spiders/{project_name}"
-zyte_schedule project_id="{project_name}" spider="{project_name}"
-zyte_list_jobs project_id="{project_name}"
+zyte_schedule project_id="{cloud_project}" spider="{project_name}"
+zyte_list_jobs project_id="{cloud_project}"
 zyte_get_results job_id="<project>/<spider>/<job>"
 ```
 

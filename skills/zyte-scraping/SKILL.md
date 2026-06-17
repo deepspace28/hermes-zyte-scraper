@@ -12,7 +12,9 @@ Use the `zyte` toolset from the hermes-zyte-scraper plugin.
 Use `zyte_extract` when the user wants data from a URL without a persistent crawler.
 
 Required: `url`
-Optional: `max_pages`, `schema`, `extract_from`, `geolocation`
+Optional: `max_pages`, `schema` (or `auto`), `auto_schema`, `extract_from`, `geolocation`, `session_id`, `custom_attributes`
+
+Schema is auto-inferred from URL when `auto_schema=true` (Indeed→jobs, Zillow→listings).
 
 If extraction quality is low, recommend `zyte_build_spider` for a custom spider.
 
@@ -26,8 +28,9 @@ If extraction quality is low, recommend `zyte_build_spider` for a custom spider.
 
 ## Environment
 
-- `ZYTE_API_KEY` — required for extraction and spider runs
+- `ZYTE_API_KEY` — required for extraction and spider runs (also set in Scrapy Cloud project env)
 - `SCRAPY_CLOUD_API_KEY` — required for deploy, schedule, list, results
+- `SCRAPY_CLOUD_PROJECT_ID` — numeric project ID for schedule/list (e.g. `867424`)
 
 ## Cost awareness
 

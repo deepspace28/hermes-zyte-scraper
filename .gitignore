@@ -35,7 +35,9 @@ scrapinghub.yml
 .venv/
 setup.py
 project.egg-info/
+*.egg-info/
 build/
+dist/
 
 # Internal documentation (history kept as PDF locally)
 internal/docs/

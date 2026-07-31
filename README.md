@@ -6,11 +6,20 @@ Describe a scraping task in natural language, extract data via Zyte API, generat
 
 ## Installation
 
+### Method 1: pip install (recommended)
+
+```bash
+pip install hermes-zyte-scraper
+```
+
+Hermes will auto-discover the plugin via entry points. No need to manually enable.
+
+### Method 2: Manual install
+
 ```bash
 git clone https://github.com/deepspace28/hermes-zyte-scraper.git ~/.hermes/plugins/hermes-zyte-scraper
 cd ~/.hermes/plugins/hermes-zyte-scraper
-pip install -r requirements.txt
-hermes plugins enable hermes-zyte-scraper
+pip install -e .
 ```
 
 Set credentials in `~/.hermes/.env`:

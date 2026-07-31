@@ -1,0 +1,62 @@
+[build-system]
+requires = ["setuptools>=45", "wheel", "setuptools-scm>=6.2"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hermes-zyte-scraper"
+version = "1.3.0"
+description = "Production-grade Zyte + Scrapy Cloud integration for Hermes agents"
+readme = "README.md"
+requires-python = ">=3.8"
+license = "Apache-2.0"
+authors = [
+    {name = "DeepSpace", email = "deepspace28@users.noreply.github.com"}
+]
+keywords = [
+    "hermes",
+    "hermes-plugin",
+    "zyte",
+    "scrapy",
+    "web-scraping",
+    "scrapy-cloud",
+    "ai-agent"
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Internet :: WWW/HTTP :: Indexing/Search",
+]
+dependencies = [
+    "zyte-api>=0.4",
+    "scrapy>=2.11",
+    "scrapy-zyte-api>=0.8",
+    "requests>=2.28",
+    "shub>=2.12",
+    "tenacity>=8.5.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/deepspace28/hermes-zyte-scraper"
+Issues = "https://github.com/deepspace28/hermes-zyte-scraper/issues"
+Repository = "https://github.com/deepspace28/hermes-zyte-scraper"
+
+[project.entry-points."hermes.plugins"]
+hermes-zyte-scraper = "hermes_zyte_scraper"
+
+[tool.setuptools]
+packages = {find = {}}
+
+[tool.setuptools.package-data]
+hermes_zyte_scraper = [
+    "plugin.yaml",
+    "skills/**/*",
+    "templates/**/*",
+    "scripts/**/*",
+]

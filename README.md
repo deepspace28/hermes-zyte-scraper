@@ -1,6 +1,6 @@
 # hermes-zyte-scraper
 
-Production-grade Zyte + Scrapy Cloud integration for Hermes agents (v1.3.0).
+Production grade Zyte + Scrapy Cloud integration for Hermes agents (v1.3.0).
 
 Describe a scraping task in natural language, extract data via Zyte API, generate production Scrapy spiders, deploy to Scrapy Cloud, schedule runs, and retrieve stored results.
 
@@ -12,7 +12,7 @@ Describe a scraping task in natural language, extract data via Zyte API, generat
 pip install hermes-zyte-scraper
 ```
 
-Hermes will auto-discover the plugin via entry points. No need to manually enable.
+Hermes will auto discover the plugin via entry points. No need to manually enable.
 
 ### Method 2: Manual install
 
@@ -96,4 +96,4 @@ python -m pytest tests/ -v
 
 ## Cost notes
 
-Zyte charges per successful API response. Browser rendering, sessions, custom attributes, and large multi-page crawls increase cost. Set spending limits in the Zyte dashboard.
+Zyte charges per successful API response. Browser rendering, sessions, custom attributes, and large mult page crawls increase cost. Set spending limits in the Zyte dashboard.

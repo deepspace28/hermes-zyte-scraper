@@ -1,8 +1,5 @@
 # hermes-zyte-scraper
 
-Production grade Zyte + Scrapy Cloud integration for Hermes agents (v1.3.0).
-
-Describe a scraping task in natural language, extract data via Zyte API, generate production Scrapy spiders, deploy to Scrapy Cloud, schedule runs, and retrieve stored results.
 
 ## Installation
 
